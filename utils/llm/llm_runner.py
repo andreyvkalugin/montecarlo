@@ -9,21 +9,18 @@ llm_runner.py — Единый инструмент для всех LLM-вызо
   run_parallel_consensus(prompts, config, response_parser) → list
   create_runner_config(model, timeout, max_retries, token_file, config_path) → dict
 """
-import json
 import os
 import re
-import subprocess
-import sys
-import tempfile
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Утилиты из utils (независимо от шагов)
 # ---------------------------------------------------------------------------
 from utils.general.paths import paths
 from utils.general.config_loader import get_pipeline_config
-from utils.llm.llm_client import _gigacode_run
+from utils.llm.llm_client import _gigachat_chat
+from gigachat.exceptions import AuthenticationError
 
 PIPELINE_CONFIG = get_pipeline_config()
 CONFIG_PATH = os.path.join(paths.to_str(paths.utils), ".gigacode_config.json")
@@ -84,104 +81,67 @@ def run_llm(prompt: str, config: Dict[str, Any]) -> Optional[str]:
     Отправляет промпт к LLM и возвращает текстовый ответ.
     
     Это ЕДИНЫЙ путь вызова LLM для всех шагов. Обрабатывает:
-    - запуск CLI GigaCode
-    - аутентификацию и токены
+    - вызов GigaChat через библиотечный клиент
+    - аутентификацию и токены (через переменные окружения GIGACHAT_*)
     - таймауты и ретраи с бэкоффом
     - обработку JSON-ответа
-    
+
     Args:
         prompt: текст промпта
         config: результат create_runner_config
-    
+
     Returns:
         Текстовый ответ LLM или None при ошибке
     """
-    model = config.get("model", "vllm/DeepSeek-V4-Flash-0731-262k")
+    model = config.get("model") or PIPELINE_CONFIG.get("llm", {}).get("model", "GigaChat-Pro")
     timeout = config.get("timeout", 180)
     max_retries = config.get("max_retries", 10)
     retry_wait_base = config.get("retry_wait_base", 2)
-    token_file = config.get("token_file")
-    config_path = config.get("config_path", CONFIG_PATH)
     max_tokens = config.get("max_tokens", 4096)
+    temperature = config.get("temperature")
 
-    # Создаём каталог для временных файлов, если не существует
-    prompts_dir = os.path.join(paths.to_str(paths.cache), "llm_prompts_temp")
-    os.makedirs(prompts_dir, exist_ok=True)
-    
-    tmp = tempfile.NamedTemporaryFile(
-        mode='w', suffix='.txt', delete=False, encoding='utf-8',
-        dir=prompts_dir,
-    ).name
-    try:
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(prompt)
-
-        project_root = paths.to_str(paths.root)
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Единый надёжный запуск CLI через stdin (node-рантайм)
-                args = [
-                    "--approval-mode", "auto-edit",
-                    "--channel", "CI",
-                    "--bare",
-                    "--chat-recording", "false",
-                ]
-                result = _gigacode_run(prompt, args, timeout, project_root)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    text = result.stdout.strip()
-                    # Извлекаем JSON если нужно
-                    text_clean = re.sub(r"^```json\s*", "", text)
-                    text_clean = re.sub(r"\s*```\s*$", "", text_clean)
-                    # Выводим статус раунда в консенсусе (через caller),
-                    # здесь только silent success — caller сам выведет.
-                    return text_clean
-
-                # Обрабатываем ошибки
-                error_msg = result.stderr[:200] if result.stderr else f"Код возврата: {result.returncode}"
-                if not error_msg and not result.stdout.strip():
-                    error_msg = "stdout пуст (код 0, но нет ответа)"
-                if any(k in error_msg.lower() for k in ["unauthorized", "auth", "token", "bearer"]):
-                    print(f"[LLM][AUTH] Ошибка аутентификации: {error_msg[:100]}", flush=True)
-                    # Аутентификация — не повторяем, сразу возвращаем None
-                    return None
-
-                if attempt < max_retries:
-                    backoff = _backoff(attempt, retry_wait_base)
-                    print(f"[LLM][RETRY] Попытка {attempt}/{max_retries}: {error_msg[:80]}...", flush=True)
-                    print(f"[LLM][WAIT] Повтор через {backoff:.1f}s...", flush=True)
-                    time.sleep(backoff)
-                else:
-                    print(f"[LLM][ERROR] CLI ошибка (исчерпаны повторы): {error_msg[:100]}", flush=True)
-
-            except subprocess.TimeoutExpired:
-                if attempt < max_retries:
-                    backoff = _backoff(attempt, retry_wait_base)
-                    print(f"[LLM][TIMEOUT] Попытка {attempt}/{max_retries}")
-                    print(f"[LLM][WAIT] Повтор через {backoff:.1f}s...")
-                    time.sleep(backoff)
-                else:
-                    print(f"[LLM][TIMEOUT] Исчерпаны повторы {max_retries}")
-                continue
-
-            except Exception as e:
-                if attempt < max_retries:
-                    backoff = _backoff(attempt, retry_wait_base)
-                    print(f"[LLM][RETRY] Исключение #{attempt}/{max_retries}: {e}")
-                    time.sleep(backoff)
-                else:
-                    print(f"[LLM][ERROR] Исключение (исчерпаны повторы): {e}")
-                continue
-
-        return None
-
-    finally:
-        # Удаляем временный файл
+    for attempt in range(1, max_retries + 1):
         try:
-            os.unlink(tmp)
-        except Exception:
-            pass
+            text, _tokens = _gigachat_chat(
+                prompt,
+                model=model,
+                timeout=timeout,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = text.strip()
+
+            if text:
+                # Извлекаем JSON если нужно
+                text_clean = re.sub(r"^```json\s*", "", text)
+                text_clean = re.sub(r"\s*```\s*$", "", text_clean)
+                return text_clean
+
+            # Пустой ответ (код 0, но нет текста) — ретраим
+            error_msg = "пустой ответ GigaChat"
+            if attempt < max_retries:
+                backoff = _backoff(attempt, retry_wait_base)
+                print(f"[LLM][RETRY] Попытка {attempt}/{max_retries}: {error_msg}...", flush=True)
+                print(f"[LLM][WAIT] Повтор через {backoff:.1f}s...", flush=True)
+                time.sleep(backoff)
+            else:
+                print(f"[LLM][ERROR] GigaChat ошибка (исчерпаны повторы): {error_msg}", flush=True)
+
+        except AuthenticationError as e:
+            # Аутентификация — не повторяем, сразу возвращаем None
+            print(f"[LLM][AUTH] Ошибка аутентификации: {str(e)[:100]}", flush=True)
+            return None
+
+        except Exception as e:
+            if attempt < max_retries:
+                backoff = _backoff(attempt, retry_wait_base)
+                print(f"[LLM][RETRY] Исключение #{attempt}/{max_retries}: {e}")
+                time.sleep(backoff)
+            else:
+                print(f"[LLM][ERROR] Исключение (исчерпаны повторы): {e}")
+            continue
+
+    return None
 
 
 # ===================================================================

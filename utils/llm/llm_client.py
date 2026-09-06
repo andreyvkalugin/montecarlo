@@ -1,130 +1,214 @@
 """
-llm_client.py - Единый клиент для запросов к LLM через GigaCode CLI.
+llm_client.py - Единый клиент для запросов к LLM через GigaChat.
 
-Использует GigaCode CLI для автоматической аутентификации.
-Совместим с новыми версиями CLI (>= 26.8.x).
+Использует официальную библиотеку gigachat (класс GigaChat) вместо
+внешнего CLI. Параметры подключения берутся из переменных окружения
+GIGACHAT_* (их читает Settings самой библиотеки):
+
+  GIGACHAT_CREDENTIALS       — ключ авторизации для OAuth (обмен на access_token);
+  GIGACHAT_ACCESS_TOKEN      — готовый access_token (JWE), альтернатива credentials;
+  GIGACHAT_BASE_URL          — адрес API (по умолчанию gigachat.devices.sberbank.ru);
+  GIGACHAT_SCOPE             — версия API (GIGACHAT_API_PERS / _CORP / _B2B);
+  GIGACHAT_VERIFY_SSL_CERTS  — "true"/"false", проверять ли TLS (по умолчанию false).
 """
 
 import json
 import os
 import re
-import subprocess
-import sys
 import time
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from gigachat import GigaChat
+from gigachat.exceptions import AuthenticationError
 
 
-# Стандартные пути установки GigaCode CLI
-GIGACODE_EXE_PATHS = [
-    r"C:\Program Files\.gigacode\bin\gigacode.exe",
-    r"C:\Program Files\GigaCode\bin\gigacode.exe",
-]
-
-GIGACODE_CMD_PATHS = [
-    r"C:\Program Files\.gigacode\bin\gigacode.cmd",
-    r"C:\Program Files\GigaCode\bin\gigacode.cmd",
-]
+def _verify_ssl_default() -> bool:
+    """Читает GIGACHAT_VERIFY_SSL_CERTS (по умолчанию False для корпоративных стендов)."""
+    val = os.environ.get("GIGACHAT_VERIFY_SSL_CERTS")
+    if val is None:
+        return False
+    return val.strip().lower() not in ("0", "false", "no", "off")
 
 
 @lru_cache()
-def _find_gigacode():
-    """Находит путь к gigacode CLI (результат кэшируется).
+def _build_gigachat_client(model: Optional[str], timeout: float, verify_ssl_certs: bool) -> GigaChat:
+    """Создаёт (и кэширует) синхронный клиент GigaChat.
 
-    Возвращает (path, wrapper):
-      - path: путь к gigacode (может быть .cmd или .exe)
-      - wrapper: None для .exe, "cmd.exe" для .cmd файлов
+    credentials / access_token / base_url / scope подхватываются из
+    переменных окружения GIGACHAT_* самим Settings библиотеки, поэтому
+    здесь их указывать не нужно.
     """
-    # Сначала проверяем .exe в стандартных местах
-    for path in GIGACODE_EXE_PATHS:
-        if os.path.isfile(path):
-            return path, None
+    LLM_CRED = "Njk5OGM4NjktZTYxYi00ZWZlLWE5NDgtZjk5NGQxZDg2MDIzOjIzMzE2NjQ5LWExMDAtNGQ3NS04YmYyLTlhODdiNzk4YWVjOQ=="
+    cmodel = "GigaChat-Pro" 
 
-    # Проверяем .cmd в стандартных местах
-    for path in GIGACODE_CMD_PATHS:
-        if os.path.isfile(path):
-            return path, "cmd.exe"
-
-    # Fallback: через PATH
-    try:
-        result = subprocess.run(
-            ["where", "gigacode"],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=5,
-        )
-        if result.returncode == 0:
-            first_line = result.stdout.strip().split('\n')[0].strip()
-            if os.path.isfile(first_line):
-                if first_line.lower().endswith('.cmd'):
-                    return first_line, "cmd.exe"
-                return first_line, None
-    except Exception:
-        pass
-
-    return "gigacode", "cmd.exe"
-
-
-def _gigacode_run(prompt: str, args, timeout: int, cwd: str) -> subprocess.CompletedProcess:
-    """Запускает GigaCode CLI, передавая промпт через stdin надёжным способом.
-
-    Вложенный `cmd.exe /c type file | gigacode` не доставляет stdin до CLI
-    (CLI отвечает "No input provided via stdin"). Поэтому для .cmd-оболочки
-    запускаем node-рантайм напрямую и передаём промпт через `input=`, который
-    не имеет лимита длины командной строки Windows.
-    """
-    path, wrapper = _find_gigacode()
-    if wrapper == "cmd.exe":
-        root = os.path.dirname(os.path.dirname(path))
-        node = os.path.join(root, "runtime", "node", "node.exe")
-        cli = os.path.join(root, "lib", "cli-entry.js")
-        identity = ""
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    m = re.match(r'\s*set\s+"GIGACODE_PACKAGE_IDENTITY=(.*?)"\s*', line)
-                    if m:
-                        identity = m.group(1)
-                        break
-        except Exception:
-            pass
-        base = [node, "--max-old-space-size=6144", cli]
-        env = os.environ.copy()
-        if identity:
-            env["GIGACODE_PACKAGE_IDENTITY"] = identity
-        env["GIGACODE_PACKAGE_LAUNCHER"] = path
-        cmd = base + list(args)
-    else:
-        cmd = [path] + list(args)
-        env = os.environ.copy()
-    return subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        cwd=cwd,
-        env=env,
-        shell=False,
+    return GigaChat(
+        credentials=LLM_CRED,
+        model=cmodel,
+        timeout=float(timeout),
+        verify_ssl_certs=verify_ssl_certs,
     )
 
 
-class LLMApiClient:
-    """Клиент для запросов к LLM через GigaCode CLI."""
+def _gigachat_chat(
+    prompt: str,
+    model: Optional[str] = None,
+    timeout: float = 180,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    verify_ssl_certs: Optional[bool] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, Dict[str, int]]:
+    """Один синхронный вызов GigaChat.
 
-    @staticmethod
-    @lru_cache()
-    def _supports_json_output() -> bool:
-        """Проверяет, поддерживает ли CLI --output-format json (результат кэшируется)."""
-        try:
-            out = subprocess.getoutput("gigacode --help 2>&1")
-            return "--output-format" in out
-        except Exception:
-            return False
+    Возвращает кортеж (text, tokens), где tokens — статистика по токенам.
+    Исключения библиотеки (AuthenticationError, ResponseError, httpx.*)
+    пробрасываются наверх: логика ретраев/бэкоффа остаётся на стороне
+    вызывающего кода.
+
+    response_format: если задан (например, {"type": "json_schema", "schema": ...}),
+    просит модель вернуть структурированный JSON — это резко снижает долю
+    синтаксически битого JSON в ответах.
+    """
+    if verify_ssl_certs is None:
+        verify_ssl_certs = _verify_ssl_default()
+
+    client = _build_gigachat_client(model, float(timeout), verify_ssl_certs)
+
+    payload: Dict[str, Any] = {"messages": [{"role": "user", "content": prompt}]}
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if response_format is not None:
+        payload["response_format"] = response_format
+
+    completion = client.chat(payload)
+
+    text = completion.choices[0].message.content if completion.choices else ""
+    usage = completion.usage
+    tokens = {
+        "prompt_tokens": usage.prompt_tokens or 0,
+        "output_tokens": usage.completion_tokens or 0,
+        "cache_read_tokens": usage.precached_prompt_tokens or 0,
+        "total_tokens": usage.total_tokens or 0,
+    }
+    return text or "", tokens
+
+
+# ---------------------------------------------------------------------------
+# Разбор JSON-ответов LLM (устойчивый к синтаксическим огрехам модели)
+# ---------------------------------------------------------------------------
+
+# response_format для батч-скоринга пар: просим модель вернуть массив
+# объектов {pair, score, reason}. GigaChat при этом возвращает валидный JSON.
+SCORING_RESPONSE_FORMAT: Dict[str, Any] = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "pairs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "pair": {"type": "string"},
+                        "score": {"type": "number"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["pair", "score", "reason"],
+                },
+            }
+        },
+        "required": ["pairs"],
+    },
+}
+
+
+def _strip_json_fences(text: str) -> str:
+    """Убирает markdown-обёртку ```json ... ``` вокруг JSON."""
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```\s*$", "", text)
+    return text
+
+
+def _extract_balanced_json(text: str) -> Optional[Union[dict, list]]:
+    """Ищет первый сбалансированный JSON-объект/массив в тексте."""
+    openers = {"{": "}", "[": "]"}
+    for i, ch in enumerate(text):
+        if ch not in openers:
+            continue
+        closer = openers[ch]
+        depth = 0
+        for j in range(i, len(text)):
+            if text[j] == ch:
+                depth += 1
+            elif text[j] == closer:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[i:j + 1])
+                    except json.JSONDecodeError:
+                        break  # переходим к следующему открывающему символу
+    return None
+
+
+def _parse_json_lenient(text: str) -> Optional[Union[dict, list]]:
+    """Пытается распарсить JSON из ответа LLM разными способами.
+
+    Порядок: прямой json.loads → поиск сбалансированного фрагмента.
+    Возвращает dict/list или None, если ничего не удалось.
+    """
+    text = _strip_json_fences(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    return _extract_balanced_json(text)
+
+
+def _extract_scored_pairs(text: str) -> List[Dict[str, Any]]:
+    """Извлекает записи скоринга {pair, score, reason} даже из битого JSON.
+
+    Модель иногда ломает разделители между объектами (например,
+    `"reason":"...."","pair":...` вместо `"reason":"..."},{"pair":...`),
+    из-за чего строгий парсер возвращает пустой результат. Здесь мы режем
+    текст по маркерам `"pair":` и вытаскиваем поля по отдельности: id пары и
+    числовой score восстанавливаются надёжно, reason — по возможности.
+    """
+    results: List[Dict[str, Any]] = []
+    for chunk in re.split(r'(?="pair"\s*:)', text):
+        m_pair = re.search(r'"pair"\s*:\s*"([^"]+)"', chunk)
+        m_score = re.search(r'"score"\s*:\s*(-?\d+(?:\.\d+)?)', chunk)
+        if not m_pair or not m_score:
+            continue
+        m_reason = re.search(r'"reason"\s*:\s*"(.*?)"\s*[,}\]]', chunk, re.DOTALL)
+        results.append({
+            "pair": m_pair.group(1),
+            "score": float(m_score.group(1)),
+            "reason": m_reason.group(1) if m_reason else "",
+        })
+    return results
+
+
+def _coerce_scored_list(parsed: Any, raw_text: str) -> List[Dict[str, Any]]:
+    """Приводит ответ скоринга к списку записей.
+
+    Учитывает, что response_format может вернуть как массив, так и объект
+    вида {"pairs": [...]}. Если распознать не удалось — устойчивый разбор
+    по regex из сырого текста.
+    """
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for value in parsed.values():
+            if isinstance(value, list):
+                return value
+    return _extract_scored_pairs(raw_text)
+
+
+class LLMApiClient:
+    """Клиент для запросов к LLM через библиотеку GigaChat."""
 
     def __init__(
         self,
@@ -136,97 +220,59 @@ class LLMApiClient:
         token_file: str = None,
         config_path: str = None,
     ):
-        self.model = model or "vllm/DeepSeek-V4-Flash-0731-262k"
+        self.model = model or "GigaChat-Pro"
         self.timeout = timeout or 180
         self.max_retries = max_retries or 10
         self._last_tokens = None
-        self._supports_json = self._supports_json_output()
 
-        # Находим gigacode (результат кэшируется на уровне модуля)
-        self._gigacode_path, self._cli_wrapper = _find_gigacode()
+    def _send_prompt_via_file(
+        self,
+        prompt: str,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Отправляет промпт в GigaChat и возвращает текст ответа.
 
-    def _send_prompt_via_file(self, prompt: str) -> Optional[str]:
-        """Отправляет промпт в GigaCode CLI через stdin с ретраями и бэкоффом."""
-
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
+        Имя метода сохранено для совместимости с вызывающим кодом; промпт
+        больше не пишется во временный файл — запрос идёт напрямую через
+        библиотечный клиент GigaChat с ретраями и экспоненциальным бэкоффом.
+        """
         for attempt in range(self.max_retries):
             try:
-                # gigacode CLI читает промпт из stdin (передаётся через input в _gigacode_run).
-                # --chat-recording false — не показывать каждый вызов как отдельный диалог в Desktop
-                args = [
-                    "--max-wall-time", "60s",
-                    "--approval-mode", "auto-edit",
-                    "--channel", "CI",
-                    "--bare",
-                    "--chat-recording", "false",
-                ]
-                if self._supports_json:
-                    args.extend(["--output-format", "json"])
+                text, tokens = _gigachat_chat(
+                    prompt,
+                    model=self.model,
+                    timeout=self.timeout,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                )
+                self._last_tokens = tokens
+                text = text.strip()
+                return text if text else None
 
-                result = _gigacode_run(prompt, args, self.timeout, project_root)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    if self._supports_json:
-                        try:
-                            stream = json.loads(result.stdout)
-                            last = stream[-1] if isinstance(stream, list) and len(stream) > 0 else {}
-                            if last.get("type") == "result":
-                                text_parts = []
-                                for msg in stream:
-                                    if msg.get("type") == "assistant" and isinstance(msg.get("message", {}).get("content"), list):
-                                        for block in msg["message"]["content"]:
-                                            if block.get("type") == "text":
-                                                text_parts.append(block.get("text", ""))
-                                text = "\n".join(text_parts).strip()
-                                usage = last.get("usage") or {}
-                                if not isinstance(usage, dict):
-                                    usage = {}
-                                self._last_tokens = {
-                                    "prompt_tokens": usage.get("input_tokens", 0) or 0,
-                                    "output_tokens": usage.get("output_tokens", 0) or 0,
-                                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
-                                    "total_tokens": usage.get("total_tokens", 0) or 0,
-                                }
-                                return text if text else result.stdout.strip()
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            pass
-                    return result.stdout.strip()
-                else:
-                    error_msg = result.stderr[:200] if result.stderr else f"Код возврата: {result.returncode}"
-                    if "unauthorized" in error_msg.lower() or "auth" in error_msg.lower() or "token" in error_msg.lower():
-                        print(f"[ERROR] Ошибка аутентификации: {error_msg}")
-                        return None
-                    print(f"[WARN] CLI возвратил ошибку (attempt {attempt+1}/{self.max_retries}): {error_msg[:100]}")
-                    if attempt < self.max_retries - 1:
-                        backoff = min(2 ** attempt, 32)
-                        print(f"[WAIT] Повтор через {backoff:.1f}s...")
-                        time.sleep(backoff)
-                    continue
-
-            except subprocess.TimeoutExpired:
-                backoff = min(2 ** attempt, 32)
-                if attempt < self.max_retries - 1:
-                    print(f"[WAIT] Таймаут CLI, повтор #{attempt+1}/{self.max_retries} через {backoff:.1f}s...")
-                    time.sleep(backoff)
-                else:
-                    print(f"[WAIT] Таймаут CLI, последний повтор ({attempt+1}/{self.max_retries})")
-                    return None
+            except AuthenticationError as e:
+                print(f"[ERROR] Ошибка аутентификации GigaChat: {e}")
+                return None
 
             except Exception as e:
                 backoff = min(2 ** attempt, 32)
                 if attempt < self.max_retries - 1:
-                    print(f"[WAIT] Ошибка: {e}, повтор #{attempt+1}/{self.max_retries} через {backoff:.1f}s...")
+                    print(f"[WAIT] Ошибка GigaChat: {e}, повтор #{attempt+1}/{self.max_retries} через {backoff:.1f}s...")
                     time.sleep(backoff)
                 else:
-                    print(f"[ERROR] Ошибка CLI: {e}, последний повтор")
+                    print(f"[ERROR] Ошибка GigaChat: {e}, последний повтор ({attempt+1}/{self.max_retries})")
                     return None
 
         return None
 
-    def _chat_with_cli(self, prompt: str, max_tokens: int = 512) -> Optional[str]:
-        """Отправляет запрос через GigaCode CLI."""
-        return self._send_prompt_via_file(prompt)
+    def _chat_with_cli(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Отправляет запрос через библиотеку GigaChat."""
+        return self._send_prompt_via_file(prompt, max_tokens=max_tokens, response_format=response_format)
 
     def print_token_stats(self) -> None:
         """Выводит статистику по токенам последнего запроса."""
@@ -244,67 +290,22 @@ class LLMApiClient:
         """Отправляет промпт и возвращает текстовый ответ."""
         return self._chat_with_cli(prompt, max_tokens=max_tokens)
 
-    def chat_json(self, prompt: str, max_tokens: int = 4096) -> Optional[Union[dict, list]]:
+    def chat_json(
+        self,
+        prompt: str,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Union[dict, list]]:
         """Отправляет промпт, ожидает JSON-ответ."""
-        text = self._chat_with_cli(prompt, max_tokens=max_tokens)
+        text = self._chat_with_cli(prompt, max_tokens=max_tokens, response_format=response_format)
         if text is None:
             return None
 
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text)
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        json_match = re.search(r'(\[\{.*?\}\]|\{.*?\})', text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        def extract_balanced_json(text):
-            for i, ch in enumerate(text):
-                if ch == '{':
-                    depth = 0
-                    start = i
-                    for j in range(i, len(text)):
-                        if text[j] == '{':
-                            depth += 1
-                        elif text[j] == '}':
-                            depth -= 1
-                            if depth == 0:
-                                try:
-                                    return json.loads(text[start:j + 1])
-                                except json.JSONDecodeError:
-                                    return None
-                elif ch == '[':
-                    depth = 0
-                    start = i
-                    for j in range(i, len(text)):
-                        if text[j] == '[':
-                            depth += 1
-                        elif text[j] == ']':
-                            depth -= 1
-                            if depth == 0:
-                                try:
-                                    return json.loads(text[start:j + 1])
-                                except json.JSONDecodeError:
-                                    return None
-            return None
-
-        result = extract_balanced_json(text)
-        if result:
+        result = _parse_json_lenient(text)
+        if result is not None:
             return result
 
-        print(f"[WARN] JSON не распарсился (LLM вернул не-JSON): {text[:200]}...")
-        if "English" in text or "английском" in text.lower() or "English JSON" in text:
-            print("[WARN] LLM ответил на английском — попробуем извлечь JSON из конца текста.")
-            result = extract_balanced_json(text)
-            if result:
-                return result
+        print(f"[WARN] JSON не распарсился (LLM вернул не-JSON): {_strip_json_fences(text)[:200]}...")
         return None
 
     def batch_scores(
@@ -313,13 +314,21 @@ class LLMApiClient:
         ids: List[str],
         max_tokens: int = 4096,
     ) -> Optional[Dict[str, Dict[str, Any]]]:
-        """Batch-запрос для оценки всех пар."""
-        items = self.chat_json(prompt, max_tokens=max_tokens)
-        if items is None:
+        """Batch-запрос для оценки всех пар.
+
+        Просит модель вернуть структурированный JSON (response_format), а при
+        синтаксически битом ответе восстанавливает записи скоринга по regex,
+        чтобы не терять весь раунд из-за одной сломанной запятой/кавычки.
+        """
+        text = self._chat_with_cli(
+            prompt, max_tokens=max_tokens, response_format=SCORING_RESPONSE_FORMAT
+        )
+        if text is None:
             return None
 
-        if not isinstance(items, list):
-            print(f"[ERROR] Ожидается список, получено: {type(items)}")
+        items = _coerce_scored_list(_parse_json_lenient(text), text)
+        if not items:
+            print(f"[WARN] Скоринг: не удалось извлечь пары из ответа: {_strip_json_fences(text)[:200]}...")
             return None
 
         ids_set = set(ids)
