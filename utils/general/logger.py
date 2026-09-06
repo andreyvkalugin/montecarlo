@@ -51,12 +51,18 @@ class Tee:
         except Exception:
             pass
 
-    def reconfigure(self, encoding=None, errors=None):
-        # Проксируем reconfigure на реальный поток (для совместимости)
+    def reconfigure(self, **kwargs):
+        # Проксируем reconfigure на реальный поток (encoding/errors/line_buffering/…)
         rc = getattr(self.stream, "reconfigure", None)
         if rc is not None:
-            return rc(encoding=encoding, errors=errors)
+            return rc(**kwargs)
         return None
+
+    def __getattr__(self, name):
+        # Прочие атрибуты (encoding, buffer, isatty, fileno, ...) берём у
+        # реального потока — шаги пайплайна теперь исполняются в одном процессе
+        # и обращаются к sys.stdout.encoding / .buffer напрямую.
+        return getattr(self.stream, name)
 
 
 def open_log_file(mode="w"):

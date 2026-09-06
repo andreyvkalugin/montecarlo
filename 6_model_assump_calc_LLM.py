@@ -71,9 +71,13 @@ class RiskGraph:
         self.risk_edges: List[RiskEdge] = []
         self.risk_node_map: Dict[str, str] = {}  # risk_id -> node_id
 
-    def load_risk_graph(self, json_file: str) -> None:
-        """Загружает граф рисков из JSON."""
-        data = load_json(json_file)
+    def load_risk_graph(self, json_file: str = None, data: dict = None) -> None:
+        """Загружает граф рисков из JSON.
+
+        data: граф рисков из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            data = load_json(json_file)
         for risk_id, rdata in data['risks'].items():
             self.risk_nodes[risk_id] = RiskNode(
                 risk_id=risk_id,
@@ -98,16 +102,20 @@ class RiskGraph:
         print(f"[LOAD] {json_file}")
         print(f"-  Узлов: {len(self.risk_nodes)}, связей: {len(self.risk_edges)}")
 
-    def load_risk_register(self, register_file: str) -> None:
-        """Загружает текстовые и числовые поля из enriched risks_processed.json."""
-        try:
-            data = load_json(register_file)
-        except FileNotFoundError:
-            print(f"[WARN] Реестр рисков не найден ({register_file}), значения 0.0")
-            return
-        except Exception as e:
-            print(f"[WARN] Ошибка загрузки реестра: {e}")
-            return
+    def load_risk_register(self, register_file: str = None, data: dict = None) -> None:
+        """Загружает текстовые и числовые поля из enriched risks_processed.json.
+
+        data: реестр рисков из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            try:
+                data = load_json(register_file)
+            except FileNotFoundError:
+                print(f"[WARN] Реестр рисков не найден ({register_file}), значения 0.0")
+                return
+            except Exception as e:
+                print(f"[WARN] Ошибка загрузки реестра: {e}")
+                return
 
         applied = 0
         for risk in data.get("risks", []):
@@ -208,6 +216,7 @@ class RiskGraph:
         }
         save_json(output_file, data)
         print(f"[SAVE] {output_file}")
+        return data
 
 
 def _to_float(value) -> float:
@@ -414,7 +423,12 @@ class Step6ConsensusStep(BaseConsensusStep):
 
 # ==================== MAIN ====================
 
-def main():
+def main(risk_graph: dict = None, risks: dict = None) -> dict:
+    """Точка входа.
+
+    risk_graph: граф рисков из шага 5 (in-memory из состояния LangGraph);
+    risks:      реестр рисков из шага 3 (in-memory). Если None — читаются с диска.
+    """
     sys.stdout.reconfigure(encoding="utf-8")
 
     INPUT_FILE = paths.risk_graph_json
@@ -422,8 +436,8 @@ def main():
     os.makedirs(paths.to_str(OUTPUT_DIR), exist_ok=True)
 
     graph = RiskGraph()
-    graph.load_risk_graph(paths.to_str(INPUT_FILE))
-    graph.load_risk_register(paths.to_str(paths.risks_processed_json))
+    graph.load_risk_graph(paths.to_str(INPUT_FILE), data=risk_graph)
+    graph.load_risk_register(paths.to_str(paths.risks_processed_json), data=risks)
 
     # Чтение промпта и построение справочника рисков для кэша
     prompt_header = ""
@@ -472,7 +486,7 @@ def main():
             graph.apply_semantic_weights(result.get("final_weights", []))
             graph.calculate_final_weights()
 
-    graph.save_risk_graph_with_weights(paths.to_str(paths.risk_graph_with_weights_json))
+    weights_doc = graph.save_risk_graph_with_weights(paths.to_str(paths.risk_graph_with_weights_json))
 
     # Сохранение аудита консенсуса
     rounds = PIPELINE_CONFIG.get("model_assumptions", {}).get("consensus", {}).get("rounds", 1) or 1
@@ -532,6 +546,9 @@ def main():
         avg_sem = sum(e.semantic_weight for e in graph.risk_edges) / len(graph.risk_edges)
         print(f"-  Средний семантический вес: {avg_sem:.3f}")
     print(f"-  structural_weight и final_weight рассчитываются в шаге 7")
+
+    # Возвращаем взвешенный граф для состояния LangGraph (JSON уже сохранён)
+    return weights_doc
 
 
 if __name__ == "__main__":

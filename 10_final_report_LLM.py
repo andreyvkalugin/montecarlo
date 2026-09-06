@@ -105,19 +105,22 @@ def fmt_rub_ci(value, ci_dict):
     return f"{fmt_rub(value)} (CI: [{lo:,.0f} .. {hi:,.0f}])"
 
 
-def load_risks(path):
+def load_risks(path, data=None):
     """
     Читает карту рисков (risks_processed.json) и возвращает список словарей
     с ключевыми фактами: номер, описание, причина, вероятность, влияние, статус.
+
+    data: реестр рисков из состояния LangGraph (in-memory); если None — читается файл.
     """
-    if not os.path.isfile(path):
-        print(f"   [WARN] Файл рисков не найден: {path}")
-        return []
-    try:
-        data = load_json(path)
-    except Exception as e:
-        print(f"   [WARN] Не удалось прочитать риски {path}: {e}")
-        return []
+    if data is None:
+        if not os.path.isfile(path):
+            print(f"   [WARN] Файл рисков не найден: {path}")
+            return []
+        try:
+            data = load_json(path)
+        except Exception as e:
+            print(f"   [WARN] Не удалось прочитать риски {path}: {e}")
+            return []
 
     risks = []
     for risk in data.get("risks", []):
@@ -439,23 +442,29 @@ def save_report(report_md, request, report_json, llm_analysis):
     print(f"   [SAVE] {request_file}")
 
 
-def main():
+def main(summary: dict = None, bayes: dict = None, edges: dict = None, risks: dict = None) -> str:
+    """Точка входа.
+
+    summary: сводная статистика из шага 9 (in-memory из состояния LangGraph);
+    bayes:   Байесовская сеть из шага 7; edges: граф КСГ из шага 2;
+    risks:   реестр рисков из шага 3. Любой None читается с диска.
+    """
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
     print("\n[LLM]  LLM REPORT: Формирование расширенного заключения")
 
-    # 1. Загружаем входные данные
-    summary = load_json(SUMMARY_FILE)
+    # 1. Загружаем входные данные (из состояния или с диска)
+    summary = summary if summary is not None else load_json(SUMMARY_FILE)
     if not summary:
         print("\n[ERROR]  Ошибка: не найдено сводных статистик (шаг 9). "
               f"Ожидается файл: {SUMMARY_FILE}")
         sys.exit(1)
 
-    network = load_json(NETWORK_FILE)
-    tasks = load_json(EDGES_FILE)
-    risk_register = load_risks(RISKS_FILE)
+    network = bayes if bayes is not None else load_json(NETWORK_FILE)
+    tasks = edges if edges is not None else load_json(EDGES_FILE)
+    risk_register = load_risks(RISKS_FILE, data=risks)
 
     # 2. Читаем промпт
     prompt = load_prompt(PROMPT_FILE)
@@ -520,6 +529,9 @@ def main():
         print("\n--- ПРЕВЬЮ АНАЛИТИКИ LLM ---")
         print(llm_analysis[:1200])
     print("\n")
+
+    # Возвращаем путь к отчёту для состояния LangGraph (Markdown уже сохранён)
+    return os.path.join(OUTPUT_DIR, "llm_report.md")
 
 
 if __name__ == "__main__":

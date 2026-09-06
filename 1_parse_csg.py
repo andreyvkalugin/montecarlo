@@ -284,7 +284,7 @@ def build_wbs_edges(nodes: list) -> list:
 # Главная функция
 # ==============================
 
-def main() -> None:
+def main() -> dict:
     # Настройка кодировки для Windows
     if sys.stdout.encoding != 'utf-8':
         try:
@@ -457,6 +457,9 @@ def main() -> None:
     print(f"-  Макс. глубина WBS: {MAX_WBS_DEPTH}")
     if filtered_out > 0:
         print(f"-  Исключено (глубже {MAX_WBS_DEPTH}): {filtered_out}")
+
+    # Возвращаем результат для передачи в состояние LangGraph (JSON уже сохранён)
+    return graph
 
 
 if __name__ == "__main__":

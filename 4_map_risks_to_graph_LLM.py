@@ -413,38 +413,46 @@ def _save_step4_results(mappings, output_json_path, pipeline_config, risks, node
     }
 
     save_json(output_json_path, result)
+    return result
 
 
 # ===================================================================
 #  MAIN
 # ===================================================================
 
-def main():
-    """Точка входа."""
+def main(risks_doc: dict = None, edges: dict = None) -> dict:
+    """Точка входа.
+
+    risks_doc: риски из шага 3 (in-memory из состояния LangGraph);
+    edges:     граф КСГ из шага 2 (in-memory). Если None — читаются с диска.
+    """
     if sys.stdout.encoding != 'utf-8':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
         except AttributeError:
             pass
 
-    if not os.path.isfile(RISKS_FILE):
+    print("\n[STEP] ПРИВЯЗКА РИСКОВ К ВЕРШИНАМ ГРАФА (консенсус нескольких запросов → мода)...")
+
+    if risks_doc is None and not os.path.isfile(RISKS_FILE):
         print(f"[ERROR]  Файл рисков не найден: {RISKS_FILE}", file=sys.stderr)
         print("Сначала запустите: python 3_parse_risks.py", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.isfile(GRAPH_JSON):
+    if edges is None and not os.path.isfile(GRAPH_JSON):
         print(f"[ERROR]  Файл графа не найден: {GRAPH_JSON}", file=sys.stderr)
         print("Сначала запустите: python main.py", file=sys.stderr)
         sys.exit(1)
 
-    print("\n[STEP] ПРИВЯЗКА РИСКОВ К ВЕРШИНАМ ГРАФА (консенсус нескольких запросов → мода)...")
-    print(f"[LOAD] {GRAPH_JSON}")
+    # Чтение рисков (из состояния или с диска)
+    risks = _read_risks(RISKS_FILE, data=risks_doc)
 
-    # Чтение рисков
-    risks = _read_risks(RISKS_FILE)
-
-    with open(GRAPH_JSON, "r", encoding="utf-8") as f:
-        graph = json.load(f)
+    if edges is not None:
+        graph = edges
+    else:
+        print(f"[LOAD] {GRAPH_JSON}")
+        with open(GRAPH_JSON, "r", encoding="utf-8") as f:
+            graph = json.load(f)
     nodes = graph.get("nodes", [])
     node_ids = [n["id"] for n in nodes]
 
@@ -462,7 +470,7 @@ def main():
             ])
             for r in risks
         ]
-        _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes,
+        result_doc = _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes,
                             {"save_metadata": {}, "iterations": 0})
     else:
         initial_state = {
@@ -488,13 +496,13 @@ def main():
 
         if cached is not None:
             mappings = cached
-            _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes,
+            result_doc = _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes,
                                 {"save_metadata": {}, "iterations": 0})
         else:
             hooks = step.build_hooks()
             result = run_step(Step4State, hooks, initial_state, label="step4")
             mappings = result.get("final_mappings", [])
-            _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes, result)
+            result_doc = _save_step4_results(mappings, OUTPUT_JSON, PIPELINE_CONFIG, risks, nodes, result)
 
     # Вывод
     print(f"\n[SAVE] {OUTPUT_JSON}")
@@ -513,19 +521,23 @@ def main():
     print(f"-  LLM: {llm_model}")
     print(f"-  Consensus: {consensus_rounds}")
 
+    # Возвращаем расчётный doc привязок для состояния LangGraph (JSON уже сохранён)
+    return result_doc
 
-def _read_risks(path: str) -> list:
+
+def _read_risks(path: str, data: dict = None) -> list:
     """
     Читает risks_processed.json → [{risk_number, risk_name, cause}, ...].
 
     Поля берутся из snake_case-записей шага 3; пустые описание/номер отбрасываются,
-    как и раньше при чтении CSV.
+    как и раньше при чтении CSV. Если передан data (in-memory из состояния
+    LangGraph) — файл не читается.
     """
-    if not os.path.isfile(path):
-        print(f"[ERROR]  Файл рисков не найден: {path}", file=sys.stderr)
-        sys.exit(1)
-
-    data = load_json(path)
+    if data is None:
+        if not os.path.isfile(path):
+            print(f"[ERROR]  Файл рисков не найден: {path}", file=sys.stderr)
+            sys.exit(1)
+        data = load_json(path)
     rows = []
     for risk in data.get("risks", []):
         risk_number = str(risk.get("risk_number", "")).strip()

@@ -259,23 +259,29 @@ class Step2ConsensusStep(BaseConsensusStep):
 #  MAIN
 # ===================================================================
 
-def main():
-    """Точка входа."""
+def main(wbs: dict = None) -> dict:
+    """Точка входа.
+
+    wbs: граф из шага 1 (in-memory, из состояния LangGraph). Если None —
+    читается с диска (standalone-режим).
+    """
     if sys.stdout.encoding != 'utf-8':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
         except AttributeError:
             pass
 
-    if not os.path.isfile(INPUT_JSON):
-        print(f"[ERROR]  Файл не найден: {INPUT_JSON}", file=sys.stderr)
-        sys.exit(1)
-
     print("\n[STEP] ДОБАВЛЕНИЕ LLM-СВЯЗЕЙ (консенсус нескольких запросов → мода)...")
-    print(f"[LOAD] {INPUT_JSON}")
 
-    with open(INPUT_JSON, "r", encoding="utf-8") as f:
-        wbs_graph = json.load(f)
+    if wbs is not None:
+        wbs_graph = wbs
+    else:
+        if not os.path.isfile(INPUT_JSON):
+            print(f"[ERROR]  Файл не найден: {INPUT_JSON}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[LOAD] {INPUT_JSON}")
+        with open(INPUT_JSON, "r", encoding="utf-8") as f:
+            wbs_graph = json.load(f)
     nodes = wbs_graph.get("nodes", [])
     wbs_edges = wbs_graph.get("edges", [])
     metadata = wbs_graph.get("metadata", {})
@@ -377,6 +383,9 @@ def main():
 
     # Очистка временных промпт-файлов после завершения шага
     _clear_prompts_temp()
+
+    # Возвращаем расчётный граф для состояния LangGraph (JSON уже сохранён)
+    return final_graph
 
 
 def _edge_type(edge: dict) -> str:

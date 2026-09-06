@@ -347,6 +347,9 @@ def main():
     print(f"-  Рисков: {len(risks)}")
     print(f"-  Полей: {len(fields)}")
 
+    # Возвращаем результат для передачи в состояние LangGraph (JSON уже сохранён)
+    return output
+
 
 if __name__ == "__main__":
     main()

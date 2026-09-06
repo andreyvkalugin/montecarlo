@@ -44,9 +44,13 @@ class RiskGraphBuilder:
         self.risk_node_map = defaultdict(list)  # {node_id: [Risk, ...]}
         self.dist_matrix = {}       # расстояния между вершинами КСГ
 
-    def load_dag(self, dag_file: str) -> None:
-        """Загружает граф КСГ для расчета топологических расстояний"""
-        data = load_json(dag_file)
+    def load_dag(self, dag_file: str = None, data: dict = None) -> None:
+        """Загружает граф КСГ для расчета топологических расстояний.
+
+        data: граф из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            data = load_json(dag_file)
 
         for node in data['nodes']:
             self.work_nodes[node['id']] = node['name']
@@ -56,9 +60,13 @@ class RiskGraphBuilder:
 
         print(f"[LOAD] {dag_file}")
 
-    def load_risks(self, mapping_file: str) -> None:
-        """Загружает риски и их привязку к вершинам КСГ"""
-        data = load_json(mapping_file)
+    def load_risks(self, mapping_file: str = None, data: dict = None) -> None:
+        """Загружает риски и их привязку к вершинам КСГ.
+
+        data: привязки из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            data = load_json(mapping_file)
 
         self.risks_dict = {}  # {risk_id: {"name": ..., "node_id": ..., "node_name": ...}}
 
@@ -247,6 +255,7 @@ class RiskGraphBuilder:
         save_json(output_file, data)
 
         print(f"[SAVE] {output_file}")
+        return data
 
     def save_pairs_json(self, pairs: List[RiskPair], output_file: str) -> None:
         """
@@ -361,8 +370,12 @@ class RiskGraphBuilder:
         print(f"[SAVE] {output_file}")
 
 
-def main():
-    """Точка входа"""
+def main(edges: dict = None, risk_mapping: dict = None) -> dict:
+    """Точка входа.
+
+    edges:        граф КСГ из шага 2 (in-memory из состояния LangGraph);
+    risk_mapping: привязки рисков из шага 4 (in-memory). Если None — читаются с диска.
+    """
     # UTF-8 вывод для Windows
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -371,18 +384,15 @@ def main():
 
     builder = RiskGraphBuilder()
 
-    # Загрузка данных
-    dag_path = paths.csg_edges_final_json
-    mapping_path = paths.risk_mapping_json
-
-    builder.load_dag(paths.to_str(dag_path))
-    builder.load_risks(paths.to_str(mapping_path))
+    # Загрузка данных (из состояния или с диска)
+    builder.load_dag(paths.to_str(paths.csg_edges_final_json), data=edges)
+    builder.load_risks(paths.to_str(paths.risk_mapping_json), data=risk_mapping)
 
     # Построение графа рисков
     pairs = builder.build()
 
     # Сохранение результатов
-    builder.save_json(pairs, paths.to_str(paths.risk_graph_json))
+    risk_graph_doc = builder.save_json(pairs, paths.to_str(paths.risk_graph_json))
     builder.save_pairs_json(pairs, paths.to_str(paths.pairwise_distances_json))
 
     # Визуализация
@@ -395,6 +405,9 @@ def main():
     unrelated = sum(1 for p in pairs if p.distance == -1)
     print(f"-  Связанных: {connected}")
     print(f"-  Несвязанных: {unrelated}")
+
+    # Возвращаем граф рисков для состояния LangGraph (JSON уже сохранён)
+    return risk_graph_doc
 
 
 if __name__ == "__main__":

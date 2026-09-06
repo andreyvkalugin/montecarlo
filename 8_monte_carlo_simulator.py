@@ -128,9 +128,13 @@ class MonteCarloSimulator:
 
     # -------------------- 1. ЗАГРУЗКА ДАННЫХ --------------------
 
-    def load_bayesian_network(self, network_file: str) -> None:
-        """Загрузка Байесовской сети с CPT из единого файла"""
-        data = load_json(network_file)
+    def load_bayesian_network(self, network_file: str = None, data: dict = None) -> None:
+        """Загрузка Байесовской сети с CPT из единого файла.
+
+        data: сеть из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            data = load_json(network_file)
         parents_map = data.get('parents', {})
 
         for risk_id, risk_data in data['risks'].items():
@@ -663,12 +667,17 @@ class MonteCarloSimulator:
         print(f"[SAVE] {scenarios_file.name} ({len(scenarios)} сценариев)")
 
         print(f"[SAVE] Результаты сохранены: {output_file}")
+        return data
 
 
 # ==================== ТОЧКА ВХОДА ====================
 
-def main():
-    """Запуск Монте-Карло симуляции из командной строки."""
+def main(bayes: dict = None) -> dict:
+    """Запуск Монте-Карло симуляции.
+
+    bayes: Байесовская сеть из шага 7 (in-memory из состояния LangGraph).
+    Если None — читается с диска (standalone-режим).
+    """
     import io
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -679,19 +688,22 @@ def main():
     BN_INPUT = paths.to_str(paths.bayesian_network_json)
     SIM_OUTPUT = os.path.join(STEP_DIR_8, "simulation_results.json")
 
-    # Проверяем входные файлы
-    if not os.path.isfile(BN_INPUT):
+    # Проверяем входные файлы (только если сеть не передана из состояния)
+    if bayes is None and not os.path.isfile(BN_INPUT):
         print(f"\n[ERROR]  ERROR: Входной файл не найден: {BN_INPUT}", file=sys.stderr)
         print("   Сначала выполните шаг 7: 7_bayesian_network_builder.py", file=sys.stderr)
         sys.exit(1)
 
     # Создаём симулятор
     sim = MonteCarloSimulator()
-    sim.load_bayesian_network(BN_INPUT)
+    sim.load_bayesian_network(BN_INPUT, data=bayes)
     sim.run_simulation()
-    sim.save_results(SIM_OUTPUT)
+    sim_doc = sim.save_results(SIM_OUTPUT)
 
     print(f"\n[OK]  Шаг 'Монте-Карло симуляция' выполнен успешно.")
+
+    # Возвращаем результаты симуляции для состояния LangGraph (JSON уже сохранён)
+    return sim_doc
 
 
 if __name__ == "__main__":

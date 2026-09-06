@@ -672,7 +672,15 @@ class Analyzer:
 
 # ==================== ТОЧКА ВХОДА ====================
 
-def main():
+def main(simulation: dict = None, bayes: dict = None) -> dict:
+    """Точка входа.
+
+    simulation: результаты симуляции из шага 8 (in-memory из состояния LangGraph);
+    bayes:      Байесовская сеть из шага 7 (in-memory). Если None — читаются с диска.
+
+    Примечание: массивы выборок (.npy) и iteration_scenarios.json остаются
+    дисковыми артефактами (их только что записал шаг 8) и читаются с диска.
+    """
     import sys
     import io
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -681,7 +689,7 @@ def main():
 
     print("\n[SUMMARY]  ANALYZER: Monte Carlo Analysis")
 
-    sim_data = load_json(str(paths.simulation_results_json))
+    sim_data = simulation if simulation is not None else load_json(str(paths.simulation_results_json))
     base_duration = sim_data["config"].get("base_duration")
     complete_date_str = sim_data["config"].get("complete_date", "2026-02-05")
     if base_duration is None:
@@ -689,7 +697,7 @@ def main():
     base_budget = sim_data["config"].get("base_budget", 2000000000)
     complete_date = datetime.strptime(complete_date_str, "%Y-%m-%d")
 
-    bayesian_network = load_json(str(paths.bayesian_network_json))
+    bayesian_network = bayes if bayes is not None else load_json(str(paths.bayesian_network_json))
 
     # Загружаем сценарии ОДИН РАЗ
     scenarios = _load_scenarios(str(paths.iteration_scenarios_json))
@@ -706,9 +714,15 @@ def main():
         risk_delay = analyzer.plot_stacked_delay_tornado(str(paths.iteration_scenarios_json))
         risk_budget = analyzer.plot_stacked_budget_tornado(str(paths.iteration_scenarios_json))
 
-        analyzer.export_summary_statistics(stats, risk_delay, risk_budget)
+        summary_doc = analyzer.export_summary_statistics(stats, risk_delay, risk_budget)
         analyzer.plot_risk_heatmaps(stats)
         analyzer.plot_sensitivity_analysis(stats, str(paths.iteration_scenarios_json))
+
+        # Возвращаем сводную статистику для состояния LangGraph (JSON уже сохранён)
+        return summary_doc
+
+    # stats пуст — вернуть None (сводка не сформирована)
+    return None
 
 
 if __name__ == "__main__":

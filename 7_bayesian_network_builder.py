@@ -100,10 +100,14 @@ class BayesianNetworkBuilder:
     
     # -------------------- 1. ЗАГРУЗКА ДАННЫХ --------------------
     
-    def load_risk_graph_with_weights(self, json_file: str) -> None:
-        """Загрузка обогащенного графа рисков"""
-        data = load_json(json_file)
-        
+    def load_risk_graph_with_weights(self, json_file: str = None, data: dict = None) -> None:
+        """Загрузка обогащенного графа рисков.
+
+        data: взвешенный граф из состояния LangGraph (in-memory); если None — читается файл.
+        """
+        if data is None:
+            data = load_json(json_file)
+
         # Загружаем риски
         for risk_id, risk_data in data['risks'].items():
             self.risks[risk_id] = RiskData(
@@ -369,6 +373,7 @@ class BayesianNetworkBuilder:
 
         save_json(output_file, data)
         print(f"[SAVE] Сохранена структура сети: {output_file}")
+        return data
 
     def print_summary(self) -> None:
         """Вывод краткой сводки по Байесовской сети"""
@@ -417,7 +422,12 @@ class BayesianNetworkBuilder:
 
 # ==================== ТОЧКА ВХОДА ====================
 
-def main():
+def main(weights: dict = None) -> dict:
+    """Точка входа.
+
+    weights: взвешенный граф рисков из шага 6 (in-memory из состояния LangGraph).
+    Если None — читается с диска (standalone-режим).
+    """
     sys.stdout.reconfigure(encoding="utf-8")
 
     # Пути
@@ -432,7 +442,7 @@ def main():
 
     # Строим сеть
     builder = BayesianNetworkBuilder(custom_config)
-    builder.load_risk_graph_with_weights(paths.to_str(INPUT_FILE))
+    builder.load_risk_graph_with_weights(paths.to_str(INPUT_FILE), data=weights)
     builder._calculate_risk_probabilities()
     builder.calculate_structural_weights()  # ← structural из decay
     builder.calculate_final_weights()       # ← final = semantic * (1 + structural)
@@ -440,10 +450,13 @@ def main():
     builder.calculate_cpt()
 
     # Сохраняем
-    builder.save_bayesian_network(paths.to_str(paths.bayesian_network_json))
+    bayes_doc = builder.save_bayesian_network(paths.to_str(paths.bayesian_network_json))
 
     # Статистика
     builder.print_summary()
+
+    # Возвращаем сеть для состояния LangGraph (JSON уже сохранён)
+    return bayes_doc
 
 if __name__ == "__main__":
     main()
