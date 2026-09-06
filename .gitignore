@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+.venv_new/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.gigacode/
+.idea/
+*.swp
+*.swo
+
+# Data - processed
+data/data_processed/
+data/raw_data/CMP
+data/raw_data/risks
+
+# Cache (LLM cached responses)
+cache/llm_cache/*.json
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Token files (secrets)
+utils/.gigacode_config.json

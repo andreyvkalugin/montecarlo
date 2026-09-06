@@ -1,0 +1,27 @@
+# --- Обработка документов ---
+# openpyxl — движок pandas для чтения Excel (.xlsx); импортируется неявно
+openpyxl>=3.1.0
+pandas>=2.0.0
+# tiktoken — только для standalone-утилиты utils/count_tokens.py (диагностика токенов), не часть пайплайна
+tiktoken>=0.7.0
+
+# --- Численные вычисления ---
+numpy>=1.24.0
+scipy>=1.10.0
+
+# --- Визуализация ---
+matplotlib>=3.7.0
+
+gigachat==0.2.1
+
+langchain==1.2.3
+langchain-chroma==1.1.0
+langchain-classic==1.0.1
+langchain-community==0.4.1
+langchain-core==1.2.6
+langchain-text-splitters==1.1.0
+langgraph==1.0.5
+langgraph-checkpoint==3.0.1
+langgraph-prebuilt==1.0.5
+langgraph-sdk==0.3.1
+langsmith==0.6.2
